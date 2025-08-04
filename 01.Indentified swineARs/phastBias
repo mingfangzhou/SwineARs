@@ -1,0 +1,36 @@
+qsub qsub_phastBias.sh
+
+'cat qsub_phastBias.sh 
+#!/bin/bash
+#PBS -N Bia
+#PBS -l nodes=1:ppn=1
+#PBS -l mem=4gb
+#PBS -q cu
+#PBS -o /home/zhoumingfang/log/phastBias_output.log
+#PBS -e /home/zhoumingfang/log/phastBias_error.log
+#PBS -t 1-18
+
+# Change directory to the location of your script
+
+
+cd /work/ZMF/accelerated-region/20species/00.CONACC/Bia
+# Define the reference genome
+REF_GENOME="Pig"
+
+# Read the line corresponding to the current PBS_ARRAYID
+line=$(sed -n "${PBS_ARRAYID}p" ../change.txt)
+read -r NC chr <<< "$line"
+
+phastBias ../maf/${NC}.maf ../4d/named_timetree-4d.nonconserved.mod Asia --output-tracts 20species-Asia-chr${chr}.gff
+
+phastBias ../maf/${NC}.maf ../4d/named_timetree-4d.nonconserved.mod Europe --output-tracts 20species-Europe-chr${chr}.gff
+
+phastBias ../maf/${NC}.maf ../4d/named_timetree-4d.nonconserved.mod Anc --output-tracts 20species-Anc-chr${chr}.gff
+
+'
+
+####combined chr gff info ##### 
+bedtools intersect -a significant_asia.txt -b Combined-20species-Asia-chr.gff  -v > significant_filterBia_Asia.txt
+
+bedtools intersect -a significant_Europe.txt -b Combined-20species-Europe-chr.gff  -v > significant_filterBia_Europe.txt
+bedtools intersect -a significant_Anc.txt -b Combined-20species-Anc-chr.gff  -v > significant_filterBia_Anc.txt

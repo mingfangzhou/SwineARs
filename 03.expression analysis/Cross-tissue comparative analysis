@@ -1,0 +1,348 @@
+##################################################
+########### tissues comparative#######################
+##################################################
+
+####Pig expression data were obtained from pigGTEx and processed with filtering###
+#################################################################
+
+#Read sample information file
+sample_info <- read.csv("Pig-GTEX-info-filter.csv", header = FALSE)
+
+#Read TPM expression data
+tpm_data <- read.table("combine-PigGTEX_expr_tpm.txt", header = TRUE, sep = "\t", check.names = FALSE)
+
+#Extract sample names and match with sample info
+sample_names <- colnames(tpm_data)[-1] 
+sample_info$combined <- paste(sample_info$V5, sample_info$V4, sep = "_")  
+#Ensure sample order matches between TPM data and sample info
+sample_info <- sample_info[match(sample_names, sample_info$V1),]
+
+#Rename TPM data columns with combined sample categories
+colnames(tpm_data) <- c("Gene", sample_info$combined)
+
+
+#Calculate median TPM for each gene across sample categories
+tpm_medians <- apply(tpm_data[, -1], 1, function(x) tapply(x, sample_info$combined, median, na.rm = TRUE))
+
+#Transpose and convert result to dataframe, restore gene names as row names
+tpm_medians_df <- as.data.frame(t(tpm_medians))
+
+rownames(tpm_medians_df) <- tpm_data$Gene  
+
+
+write.table(tpm_medians_df, "gene_median_by_category.tsv",  quote = FALSE, sep = "\t", row.names = T)
+
+
+#Compute log2(median TPM + 1)
+alllog2_tpm <- log2(tpm_medians_df + 1)
+
+
+write.table(alllog2_tpm, "gene_medianlog2_by_category.tsv",  quote = FALSE, sep = "\t", row.names = T)
+
+
+
+# Filter genes with median TPM >= 1 in any tissue
+filtered_tpm1 <- tpm_medians_df[rowSums(tpm_medians_df >= 1) > 0, ]
+
+
+# Compute log2 transform for filtered genes
+alllog2_tpmD1 <- log2(filtered_tpm1 + 1)
+
+write.table(alllog2_tpmD1, "gene_medianlog2_TPMD1_by_category.tsv", quote = FALSE, sep = "\t", row.names = TRUE)
+
+####################################################################
+#############Calculate SPM and tau values using tspex in Linux
+
+#### tspex gene_medianlog2_by_category.tsv log2spm.tsv spm
+ ####tspex gene_medianlog2_TPMD1_by_category.tsv log2TPMD1tau.tsv tau
+
+######################################################################
+
+
+library(ggplot2)
+
+# Read gene list
+gene_list <- read.table("unionSusgene_assemble_ID", header = FALSE, stringsAsFactors = FALSE)[,1]
+
+#Read median TPM data
+tpm_medians_df <- read.table("gene_median_by_category.txt", header = TRUE, row.names = 1, sep = "\t", check.names = FALSE)
+
+#Filter only genes of interest
+tpm_filtered <- tpm_medians_df[rownames(tpm_medians_df) %in% gene_list, ]
+
+
+# Filter only genes of interest
+tpm_filtered_numeric <- as.data.frame(sapply(tpm_filtered, as.numeric))
+
+#compute log2
+log2_tpm <- log2(tpm_filtered_numeric + 1)
+
+#Compute average log2TPM and SE per category
+summary_stats <- data.frame(
+  Category = colnames(log2_tpm),
+  Avg_Log2_TPM = colMeans(log2_tpm, na.rm = TRUE),
+  Log2_SE = apply(log2_tpm, 2, function(x) sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x))))
+)
+
+#Sort by descending average expression
+summary_stats <- summary_stats[order(-summary_stats$Avg_Log2_TPM), ]
+
+
+#Extract tissue names (column names)
+organ_names <- summary_stats$Category
+
+
+#Extract prefix from tissue names
+organ_prefixes <- sapply(organ_names, function(x) strsplit(x, "_")[[1]][1])  
+
+# Assign colors to tissue prefixes
+prefix_colors <- setNames(
+  c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", 
+    "#7f7f7f", "#bcbd22", "#17becf", "#fbb4b9", "#b3cde3", "#c2f0c2", "#f1e2a1",
+    "#b7d7e8", "#f2d7d9", "#e6f5d0", "#fcf4d9", "#c6d9f0", "#e3e1f1", "#f9c8d6", 
+    "#ffb3e6", "#d1cfe2", "#a2d8e6"),
+  c("Brain", "Embryo", "Lung", "Ovary", "Fetal thymus", "Testis", "Muscle", "Artery", 
+    "Lymph node", "Small intestine", "Kidney", "Spleen", "Uterus", "Adipose", "Oocyte", 
+    "Large intestine", "Placenta", "Blood", "Heart", "Liver", "Milk", "Synovial membrane", "Cartilage")
+)
+
+
+#Map colors to each tissue
+summary_stats$Color <- prefix_colors[organ_prefixes]
+
+#Remove prefix in tissue names for plot
+summary_stats$Short_Category <- gsub(".*_", "", summary_stats$Category)
+
+#Plot bar chart with SE
+p <- ggplot(summary_stats, aes(x = reorder(Short_Category, -Avg_Log2_TPM), y = Avg_Log2_TPM, fill = organ_prefixes)) +
+  geom_bar(stat = "identity",linewidth= 0.2) +  
+  geom_errorbar(aes(ymin = Avg_Log2_TPM - Log2_SE, ymax = Avg_Log2_TPM + Log2_SE), 
+                width = 0.1, linewidth = 0.2) +  
+  scale_fill_manual(values = prefix_colors) + 
+  labs(title = " ", #Gene Expression (Log2 TPM) with SE
+       x = "Tissue",
+       y = "Average Expression Level") +
+  theme_classic() + 
+  theme(axis.title = element_text(size = 8, color = "black"),
+        axis.text.x = element_text(size = 8, color = "black", angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_text(size = 8, color = "black"),legend.position = "top",
+        legend.text = element_text(size = 6),  
+        legend.title = element_text(size = 8),axis.line = element_line(linewidth = 0.3 ) , axis.ticks = element_line(size = 0.3)) +) +
+  guides(fill = guide_legend(title = "Tissue Category", ncol =6 , keyheight = 0.4, keywidth = 0.4))  
+p
+
+
+ggsave("Gene_Expression_with_legend.pdf", plot = p, width = 8, height = 5)
+
+
+
+
+##########plot heatmap##################
+
+library(ComplexHeatmap)
+library(circlize)
+library(tidyverse)
+library(Heatmap)
+
+
+expression_data <- tpm_filtered %>%
+  as.matrix()
+
+log_expression_data <- log2(expression_data + 1)
+
+organ_names <- colnames(log_expression_data)
+organ_prefixes <- sapply(organ_names, function(x) strsplit(x, "_")[[1]][1])  
+organ_suffixes <- sapply(organ_names, function(x) strsplit(x, "_")[[1]][2])  
+
+
+colnames(log_expression_data) <- organ_suffixes
+
+# 为每个组织的前缀分配颜色 (选择一组科学配色)
+prefix_colors <- setNames(
+  c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", 
+    "#7f7f7f", "#bcbd22", "#17becf", "#fbb4b9", "#b3cde3", "#c2f0c2", "#f1e2a1",
+    "#b7d7e8", "#f2d7d9", "#e6f5d0", "#fcf4d9", "#c6d9f0", "#e3e1f1", "#f9c8d6", 
+    "#ffb3e6", "#d1cfe2", "#a2d8e6"),
+  c("Brain", "Embryo", "Lung", "Ovary", "Fetal thymus", "Testis", "Muscle", "Artery", 
+    "Lymph node", "Small intestine", "Kidney", "Spleen", "Uterus", "Adipose", "Oocyte", 
+    "Large intestine", "Placenta", "Blood", "Heart", "Liver", "Milk", "Synovial membrane", "Cartilage")
+)
+
+
+
+pdf("gene_expression_heatmap_with_annotation.pdf", width = 4.5, height = 7) 
+
+organ_annotation <- HeatmapAnnotation(
+  organ = anno_simple(organ_prefixes, col = prefix_colors),
+  annotation_name_gp = gpar(fontsize = 4),
+  height = unit(0.1, "cm")  
+
+
+ht <- Heatmap(log_expression_data,
+        name = "Log2(TPM+1)",
+        column_title = "Tissues",
+        row_title = "Genes",
+        show_row_names = FALSE,
+        show_column_names = TRUE,
+        cluster_columns = TRUE, 
+        cluster_rows = TRUE,     
+        clustering_distance_columns = "pearson",  
+        clustering_method_columns = "complete", 
+        show_row_dend = FALSE,
+        #row_dend_gp = gpar(lwd = 0.4), 
+        column_dend_gp = gpar(lwd = 0.4), 
+        col = colorRamp2(c(min(log_expression_data), 
+                           median(log_expression_data), 
+                           max(log_expression_data)),
+                         c("blue", "white", "red")),
+        row_names_gp = gpar(fontsize = 7),  
+        column_names_gp = gpar(fontsize = 7), 
+        row_title_gp = gpar(fontsize = 7),  
+        column_title_gp = gpar(fontsize =7), 
+        heatmap_legend_param = list(
+          title_gp = gpar(fontsize = 7),  
+          labels_gp = gpar(fontsize = 7),
+          width = unit(0.3, "cm"),
+          legend_direction = "horizontal" 
+        ),
+        top_annotation = organ_annotation
+        )
+
+draw(ht, heatmap_legend_side = "top")
+
+dev.off()  
+
+
+# Use the draw() function to render the Heatmap and save the object 
+# (this step is necessary in order to extract the clustering order)
+ht_drawn <- draw(ht)
+
+#Get the clustered row order (genes)
+#Extract row clustering order: multiple slices may return multiple vectors
+row_order_list <- row_order(ht_drawn)
+
+#Combine row orders from all slices into a single vect
+ordered_gene_names <- unlist(lapply(row_order_list, function(order) rownames(log_expression_data)[order]))
+
+#Extract column clustering order
+column_order_list <- column_order(ht_drawn)
+ordered_sample_names <- unlist(lapply(column_order_list, function(order) colnames(log_expression_data)[order]))
+
+
+######Draw heatmap for SPM values######
+
+library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+
+#Read the log2SPM data
+log2spm_data <- read.table("log2spm.tsv", header = TRUE, sep = "\t", row.names = 1, check.names = FALSE)
+
+#Read the gene list
+gene_list <- read.table("unionSusgene_assemble_ID", header = FALSE, stringsAsFactors = FALSE)[, 1]
+
+#Filter the data to include only genes in the gene list
+log2filtered_data <- log2spm_data[rownames(log2spm_data) %in% gene_list, ]
+
+# Extract prefixes and suffixes from column names 
+organ_names <- colnames(log2filtered_data)
+organ_prefixes <- sapply(organ_names, function(x) strsplit(x, "_")[[1]][1])
+organ_suffixes <- sapply(organ_names, function(x) strsplit(x, "_")[[1]][2]) 
+
+# Rename columns to keep only the suffix part
+colnames(log2filtered_data) <- organ_suffixes
+
+# Assign colors to each tissue prefix (using a color palette)
+prefix_colors <- setNames(
+  c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", 
+    "#7f7f7f", "#bcbd22", "#17becf", "#fbb4b9", "#b3cde3", "#c2f0c2", "#f1e2a1",
+    "#b7d7e8", "#f2d7d9", "#e6f5d0", "#fcf4d9", "#c6d9f0", "#e3e1f1", "#f9c8d6", 
+    "#ffb3e6", "#d1cfe2", "#a2d8e6"),
+  c("Brain", "Embryo", "Lung", "Ovary", "Fetal thymus", "Testis", "Muscle", "Artery", 
+    "Lymph node", "Small intestine", "Kidney", "Spleen", "Uterus", "Adipose", "Oocyte", 
+    "Large intestine", "Placenta", "Blood", "Heart", "Liver", "Milk", "Synovial membrane", "Cartilage")
+)
+
+# Create a color annotation for tissues
+organ_annotation <- HeatmapAnnotation(
+  Tissue = anno_simple(organ_prefixes, col = prefix_colors),
+  annotation_name_gp = gpar(fontsize = 4),
+  height = unit(0.1, "cm")  # Adjust annotation height
+)
+
+
+pdf("SPM_Gene_Expression_Heatmap_order.pdf", width = 4.5, height = 7)
+
+##Align data with gene order
+log2filtered_data_ordered <- log2filtered_data[ordered_gene_names, ]
+
+#Create heatmap object
+ht <- Heatmap(log2filtered_data_ordered,
+        name = "SPM",
+        column_title = "Tissues",
+        row_title = "Genes",
+        show_row_names = FALSE,            
+        show_column_names = TRUE,        
+        cluster_columns = TRUE,          
+        cluster_rows = FALSE,             
+        clustering_distance_columns = "pearson",
+        clustering_method_columns = "complete",
+        row_dend_gp = gpar(lwd = 0.4),  
+        column_dend_gp = gpar(lwd = 0.4), 
+        col = colorRampPalette(c("blue", "white", "red"))(100), 
+        row_names_gp = gpar(fontsize = 7),   
+        column_names_gp = gpar(fontsize = 7), 
+        row_title_gp = gpar(fontsize = 7),   
+        column_title_gp = gpar(fontsize = 7), 
+        heatmap_legend_param = list(
+          title_gp = gpar(fontsize = 7),
+          labels_gp = gpar(fontsize = 7), 
+          width = unit(0.3, "cm"),
+
+        legend_direction = "horizontal" 
+          ),
+          top_annotation = organ_annotation
+          )
+          
+          draw(ht, heatmap_legend_side = "top")
+
+dev.off() 
+
+
+###### Analyze and visualize tau distribution
+
+pig_tau <- read_delim("log2TPMD1tau.tsv", delim = "\t", escape_double = FALSE, 
+                         trim_ws = TRUE)  %>%
+  set_names(c("GeneID", "tau"))
+
+
+#Read gene list
+gene_list <- read.table("unionSusgene_assemble_ID", header = FALSE, stringsAsFactors = FALSE)[, 1]
+
+#Filter pig_tau to include only genes in the list
+
+subset_tau <- pig_tau %>% filter(GeneID %in% gene_list)
+
+p1 <- ggplot(pig_tau, aes(x = tau)) +
+  geom_density(fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Density Distribution of tau Values (All Genes)", x = "tau", y = "Density") +
+  theme_minimal()
+
+p2 <- ggplot(subset_tau, aes(x = tau)) +
+  geom_density(fill = "orange", color = "black", alpha = 0.7) +
+  labs(title = "Density Distribution of tau Values (Gene List)", x = "tau", y = "Density") +
+  theme_classic()
+
+p2
+p3 <- ggplot() +
+  geom_density(data = pig_tau, aes(x = tau, fill = "All Genes"), color = "black", alpha = 0.5) +
+  geom_density(data = subset_tau, aes(x = tau, fill = "Gene List"), color = "black", alpha = 0.7) +
+  scale_fill_manual(values = c("All Genes" = "#4C9EEB", "Gene List" = "orange")) +
+  labs(title = "Comparison of tau Density Distributions", x = "tau", y = "Density", fill = "Group") +
+  theme_classic()
+
+p3
+
+ggsave("tau-value-distribution.pdf", plot = p3, width = 10, height = 8, dpi = 300)
+
+

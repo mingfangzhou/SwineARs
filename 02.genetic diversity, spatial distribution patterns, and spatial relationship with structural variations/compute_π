@@ -1,0 +1,91 @@
+####compute ARs π
+
+cat qsub101-Pi-SNP.sh 
+#!/bin/bash
+#PBS -N pig_pi_array
+#PBS -l nodes=1:ppn=1  
+#PBS -l mem=2gb
+#PBS -e /home/zhoumingfang/log/pig_pi_${PBS_ARRAYID}.err
+#PBS -o /home/zhoumingfang/log/pig_pi_${PBS_ARRAYID}.log
+#PBS -q cu
+#PBS -t 1-101  
+cd /work/ZMF/accelerated-region/20species/07.select
+CURRENT_REGION=$(sed -n "${PBS_ARRAYID}p" ./Sus_scrofa_combined_significant_data.bed)
+
+chrom=$(echo $CURRENT_REGION | awk '{print $1}')
+start=$(echo $CURRENT_REGION | awk '{print $2}')
+end=$(echo $CURRENT_REGION | awk '{print $3}')
+
+
+ VCF_FILE="/work/ZMF/02/qianzhu-vcf-web/chr${chrom}.vcf.gz"
+
+        #Extract SNPs used for calculating nucleotide diversity (π)
+        vcftools --gzvcf $VCF_FILE --chr $chrom --from-bp $start --to-bp $end --site-pi   --remove-indels --out ./Sus-scrofa-SNP/temp_pi-$chrom-$start
+
+        # If nucleotide diversity (π) data is available for this region
+        if [ -f ./Sus-scrofa-SNP/temp_pi-$chrom-$start.sites.pi ]; then
+            #Extract π values from the region and calculate the average
+            pi_values=$(awk 'NR > 1 {print $3}' ./Sus-scrofa-SNP/temp_pi-$chrom-$start.sites.pi) 
+            if [ -n "$pi_values" ]; then
+                mean_pi=$(echo "$pi_values" | awk '{sum += $1; count++} END {if (count > 0) print sum / count}')
+            else
+                mean_pi="NA"
+            fi
+        else
+            mean_pi="NA"
+        fi
+
+        echo -e "$chrom\t$start\t$end\t$mean_pi" > ./Sus-scrofa-SNP/mean_pi-$chrom-$start
+
+
+
+  #####compute random region π
+
+   cat qsub101-random-Pi-SNP.sh 
+#!/bin/bash
+#PBS -N pig_pi_array
+#PBS -l nodes=1:ppn=1
+#PBS -l mem=1gb
+#PBS -e /home/zhoumingfang/log/pig_pi_random${PBS_ARRAYID}.err
+#PBS -o /home/zhoumingfang/log/pig_pi_random${PBS_ARRAYID}.log
+#PBS -q cu
+#PBS -t 1-1000  
+cd /work/ZMF/accelerated-region/20species/07.select
+
+
+mkdir -p  ./Sus-scrofa-SNP/random-pi
+
+mkdir -p  ./Sus-scrofa-SNP/random-mean
+
+#Use the current task ID as the sampling identifie
+i=${PBS_ARRAYID}
+
+#Perform random sampling
+bedtools shuffle -i ./Sus_scrofa_combined_significant_data.bed -g ~/refrence-11/Sscrofa11.fasta.fai -incl ./get-background/filter-timetree-allmod4dnonconsmod.bed -chrom -excl ./Sus_scrofa_combined_significant_data.bed > ./Sus-scrofa-SNP/random-pi/shuffled_$i.bed
+
+while read chrom start end; do
+
+
+VCF_FILE="/work/ZMF/02/qianzhu-vcf-web/chr${chrom}.vcf.gz"
+
+#Extract SNPs used for calculating nucleotide diversity (π)
+vcftools --gzvcf $VCF_FILE --chr $chrom --from-bp $start --to-bp $end --site-pi  --remove-indels   --out ./Sus-scrofa-SNP/random-pi/random$i-temp_back-pi-$chrom-$start-$i
+
+# If nucleotide diversity (π) data is available for this region
+if [ -f ./Sus-scrofa-SNP/random-pi/random$i-temp_back-pi-$chrom-$start-$i.sites.pi ]; then
+    #Extract π values from the region and calculate the average
+    pi_values=$(awk 'NR > 1 {print $3}' ./Sus-scrofa-SNP/random-pi/random$i-temp_back-pi-$chrom-$start-$i.sites.pi)  
+    if [ -n "$pi_values" ]; then
+        mean_pi=$(echo "$pi_values" | awk '{sum += $1; count++} END {if (count > 0) print sum / count}')
+    else
+        mean_pi="NA"
+    fi
+else
+    mean_pi="NA"
+fi
+
+echo -e "$chrom\t$start\t$end\t$mean_pi\trandom$i" >> ./Sus-scrofa-SNP/random-mean/random$i-all-mean_back-pi-results.txt
+
+
+done < ./Sus-scrofa-SNP/random-pi/shuffled_$i.bed
+

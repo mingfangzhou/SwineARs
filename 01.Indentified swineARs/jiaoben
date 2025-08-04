@@ -1,0 +1,36 @@
+nohup singularity exec ./cactusv2.6.8.sif cactus  20-job-mask-work mashtree-20species.txt 20species-mask-Alignment.hal --consMemory 60Gi --coordinationDir ~/ZMF-cactus/tmp   --workDir ~/ZMF-cactus/tmp > nohup_output-mask.txt 2>&1 &
+
+nohup singularity exec ./cactusv2.6.8.sif   hal2maf 20species-mask-Alignment.hal 20species-mask-Alignment-rmDupes-Orthologs.maf  --noDupes --onlyOrthologs   --noAncestors --refGenome Duroc  > nohup_maf-m.txt 2>&1 &
+
+python final-filterblocks-keep8.v2.py
+
+mafSplit _.bed maf/ ../Final-20species-filter-block_alignment-keep8_out2.maf  -byTarget -useFullSequenceName
+
+cd 4d
+sh 4dnonmod.sh
+sh phyloFit-mod.sh
+
+
+tree_doctor --name-ancestors timetree-4d.nonconserved.mod > named_timetree-4d.nonconserved.mod
+
+cd ../
+
+qsub timetree-qsub_acc-con-bed-4dnonconsmod.sh
+
+cd phylop
+
+qsub qsub_phyloP.sh
+
+
+###filter ACC region####
+cat *Asia*.bed > timetree-CONACC-20species.4d-branch-Asia-allchr.bed
+bedtools nuc -fi /work/ZMF/accelerated-region/assemble-data/GCF_000003025.6_Sscrofa11.1_genomic.clean.fa -bed timetree-CONACC-20species.4d-branch-Asia-allchr.bed  > 20species_Asia_regions_gc_content.txt
+awk '{ if ($9 < 0 || $9 == "-0.00000") { $9 = -$9; print } }'  20species_Asia_regions_gc_content.txt > positiveACC-20species_Asia_regions_gc_content.txt
+
+cat *Europe*.bed > timetree-CONACC-20species.4d-branch-Europe-allchr.bed
+bedtools nuc -fi /work/ZMF/accelerated-region/assemble-data/GCF_000003025.6_Sscrofa11.1_genomic.clean.fa -bed timetree-CONACC-20species.4d-branch-Europe-allchr.bed > 20species_Europe_regions_gc_content.txt
+awk '{ if ($9 < 0 || $9 == "-0.00000") { $9 = -$9; print } }' 20species_Europe_regions_gc_content.txt > positiveACC-20species_Europe_regions_gc_content.txt
+
+cat *Anc*.bed > timetree-CONACC-20species.4d-branch-Anc-allchr.bed
+bedtools nuc -fi /work/ZMF/accelerated-region/assemble-data/GCF_000003025.6_Sscrofa11.1_genomic.clean.fa -bed timetree-CONACC-20species.4d-branch-Anc-allchr.bed > 20species_Anc_regions_gc_content.txt
+awk '{ if ($9 < 0 || $9 == "-0.00000") { $9 = -$9; print } }' 20species_Anc_regions_gc_content.txt > positiveACC-20species_Anc_regions_gc_content.txt

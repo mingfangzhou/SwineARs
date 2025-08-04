@@ -1,0 +1,377 @@
+#######################  
+######Data Preparation####
+#######################
+
+############human and cattle expression data filter  orthologous gene by artical "Comparative transcriptome in large-scale human and cattle populations"  ############https://genomebiology.biomedcentral.com/articles/10.1186/s13059-022-02745-4
+############pig expression data downlode from pigGTEx and filter#######################################
+
+load("./human10830_cattle4866_17315gene.Rdata")
+human_tpm <- t(human_expression)
+cattle_tpm <- t(Cattle_expression)
+#Load TPM expression data
+pig_tpm<- read.table("combine-PigGTEX_expr_tpm_unique.txt", header = TRUE, sep = "\t", row.names = 1 )
+
+####Read metadata of analyzed samples
+
+#deal  Cattle
+cattle_info <- read.table("Cattle-cross-species-compare-info",
+                          header = FALSE,
+                          sep = "\t",
+                          stringsAsFactors = FALSE)
+#Assign column names
+colnames(cattle_info) <- c("SampleID", "Tissue")
+
+# deal Pig
+pig_info <- read.table("Pig-cross-species-compare-info",
+                       header = FALSE,
+                       sep = "\t",
+                       stringsAsFactors = FALSE)
+colnames(pig_info) <- c("SampleID", "Tissue")
+
+# deal Human
+human_info <- read.table("Human-cross-species-compare-info",
+                         header = FALSE,
+                         sep = "\t",
+                         stringsAsFactors = FALSE)
+colnames(human_info) <- c("SampleID", "Tissue")
+
+
+#Keep only pig samples present in pig_info
+
+pig_tpm_sub <- pig_tpm[ , colnames(pig_tpm) %in% pig_info$SampleID]
+
+
+#Keep only human samples present in human_info
+human_tpm_sub <- human_tpm[ , colnames(human_tpm) %in% human_info$SampleID]
+
+#Keep only cattle samples present in cattle_info
+cattle_tpm_sub <- cattle_tpm[ , colnames(cattle_tpm) %in% cattle_info$SampleID]
+
+
+####One-to-one orthologous genes obtained from Ensembl BioMart
+ortho_gene <- read.table("uniq-ortho-gene-human-pig-cow",
+                         header = FALSE, sep = "\t", check.names = FALSE)
+
+colnames(ortho_gene)[1] <- "human"
+colnames(ortho_gene)[3] <- "pig"
+colnames(ortho_gene)[6] <- "cow"
+
+ortho_gene <- ortho_gene[, c("human", "pig", "cow")]
+
+#Extract gene names from each species' expression matrix
+human_genes  <- rownames(human_tpm_sub)
+pig_genes    <- rownames(pig_tpm_sub)
+cattle_genes <- rownames(cattle_tpm_sub)
+
+#Filter genes present in all three species
+ortho_common <- ortho_gene[
+  ortho_gene$human %in% human_genes &
+    ortho_gene$pig   %in% pig_genes   &
+    ortho_gene$cow   %in% cattle_genes,
+]
+
+
+#Check number of filtered orthologous genes
+nrow(ortho_common)
+head(ortho_common)
+
+
+#####Extract corresponding ortholog gene lists for each species
+human_keep  <- ortho_common$human
+pig_keep    <- ortho_common$pig
+cattle_keep <- ortho_common$cow
+
+## ---------- Human ----------
+#Subset human TPM by selected orthologs in same order
+human_tpm_sub2 <- human_tpm_sub[human_keep, , drop = FALSE]
+#Rename rows to pig gene IDs for consistency
+rownames(human_tpm_sub2) <- pig_keep  
+
+## ---------- Cattle ----------
+#Same operation for cattle
+cattle_tpm_sub2 <- cattle_tpm_sub[cattle_keep, , drop = FALSE]
+rownames(cattle_tpm_sub2) <- pig_keep
+
+## ---------- Pig ----------
+#Pig genes already match, just subset and ensure order
+pig_tpm_sub2 <- pig_tpm_sub[pig_keep, , drop = FALSE]
+rownames(pig_tpm_sub2) <- pig_keep  #Rename again to ensure consistent ordering
+
+##Check if gene order is consistent across species
+all.equal(rownames(human_tpm_sub2), rownames(pig_tpm_sub2))    
+all.equal(rownames(cattle_tpm_sub2), rownames(pig_tpm_sub2))
+
+
+combined_tpm_sub2 <- cbind(human_tpm_sub2, pig_tpm_sub2, cattle_tpm_sub2)
+
+#Row names are gene IDs
+head(rownames(combined_tpm_sub2))
+#Column names include all samples from Human, Pig, and Cattle
+head(colnames(combined_tpm_sub2))
+
+#####Combined
+#Add species label to pig_info
+pig_info$Species <- "Pig"
+# cattle_info
+cattle_info$Species <- "Cattle"
+# human_info
+human_info$Species <- "Human"
+
+#Merge sample info from all species
+combined_info <- rbind(pig_info, cattle_info, human_info)
+
+
+####
+group_by(combined_info, Species, Tissue) %>%
+  summarise(count = n()) %>%d
+  pivot_wider(names_from = Tissue, values_from = count)
+
+
+write.table(combined_info, "combined_3species_info.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(combined_tpm_sub2, "combined_3species_tpm_sub2.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+
+
+
+
+
+##################################################
+########### cross  species comparative#####################
+##################################################
+
+
+####The orthologous genes used for downstream analyses were extracted from the file combined_3species_tpm_sub2.txt.#####
+
+
+ library(limma)
+ library(dplyr)
+ library(tibble)
+ library(ggplot2)
+ library(readr)
+
+#Load the list of orthologous genes.
+acc_orth <- read.table("acc_orth_gene_93", header = TRUE, row.names = 1, sep = "\t", check.names = FALSE, stringsAsFactors = FALSE)
+
+#Read metadata of analyzed samples
+combined_info <- read.table("combined_3species_info.txt", header = TRUE, sep = "\t", check.names = FALSE, stringsAsFactors = FALSE)
+
+##log2(TPM + 1) 
+acc_orth_log2 <- log2(acc_orth + 1)
+
+ 
+ 
+ #####################Differential expression analysis###############
+ 
+ 
+ # parise species
+ species_pairs <- list(
+   Pig_Human = c("Pig", "Human"),
+   Pig_Cattle = c("Pig", "Cattle"),
+   Human_Cattle = c("Human","Cattle")
+ )
+ 
+ #Define tissue order
+ tissue_order <- c(
+   "Hypothalamus", "Frontal_cortex", "Pituitary", "Testis", "Uterus",
+   "Ovary", "Adipose", "Blood", "Heart", "Kidney", "Colon",
+   "Liver", "Lung", "Muscle", "Ileum", "Spleen"
+ )
+ 
+ #Color configuration
+ direction_colors <- c("UP" = "#377eb8", "DOWN" = "#e41a1c")
+ 
+ #Load the Ensembl ID and gene symbol mapping file
+ acc_orth_genename <- read.table("acc_gene93_symbol", header = FALSE, col.names = c("Gene", "Symbol"))
+ 
+ #Loop over species pairs and tissues
+ for (pair_name in names(species_pairs)) {
+   
+   species_list <- species_pairs[[pair_name]]
+   de_results <- data.frame()
+   
+   for (ts in unique(combined_info$Tissue)) {
+     
+     tissue_meta <- combined_info %>%
+       filter(Tissue == ts & Species %in% species_list)
+     
+     if (nrow(tissue_meta) < 2) next
+     
+     tissue_tpm <- acc_orth_log2[, tissue_meta$SampleID]
+     
+     gene_var <- apply(tissue_tpm, 1, var)
+     tissue_tpm <- tissue_tpm[gene_var > 0.01, ]
+     
+     # indentified tissue order
+     tissue_meta$Species <- factor(tissue_meta$Species, levels = species_list)
+     design <- model.matrix(~ 0 + Species, data = tissue_meta)
+     colnames(design) <- species_list
+     
+     contrast_matrix <- makeContrasts(
+       contrasts = paste0(species_list[1], "-", species_list[2]),
+       levels = design
+     )
+     
+     fit <- lmFit(tissue_tpm, design) %>%
+       contrasts.fit(contrast_matrix) %>%
+       eBayes()
+     
+     results <- topTable(fit, adjust = "BH", number = Inf)
+     
+     results_df <- results %>%
+       rownames_to_column(var = "gene") %>%
+       mutate(tissue = ts)
+     
+     de_results <- bind_rows(de_results, results_df)
+   }
+   
+   de_results <- de_results %>%
+     mutate(direction = if_else(abs(logFC) < 2 | adj.P.Val >= 0.05, "NOT SIGNIFICANT",
+                                if_else(logFC > 2, "UP", "DOWN"))) %>%
+     left_join(acc_orth_genename, by = c("gene" = "Gene")) %>%
+     mutate(gene = ifelse(is.na(Symbol), gene, Symbol)) %>%
+     select(-Symbol)
+   
+
+   write.csv(de_results, file = paste0(pair_name, "_DE_genes_93.csv"), row.names = FALSE)
+   
+   #Count DE genes for visualization
+   de_results_summ <- de_results %>%
+     filter(direction != "NOT SIGNIFICANT") %>%
+     group_by(tissue, direction) %>%
+     summarise(count = n(), .groups = "drop") %>%
+     mutate(tissue = factor(tissue, levels = rev(tissue_order), ordered = TRUE))
+   
+   # plot
+   p <- ggplot(de_results_summ, aes(x = tissue,
+                                    y = ifelse(direction == "UP", count, -count),
+                                    fill = direction)) +
+     geom_col(width = 0.7) +
+     scale_fill_manual(values = direction_colors) +
+     scale_y_continuous(expand = c(0, 0), labels = abs) +
+     coord_flip() +
+     theme_bw(base_size = 16) +
+     labs(
+       x = "Tissue",
+       y = "Number of DE genes",
+       fill = "Direction",
+       title = paste(species_list[1], "relative to", species_list[2], ": Differentially Expressed Genes")
+     ) +
+     theme(
+       axis.text = element_text(color = "black"),
+       axis.text.y = element_text(size = 12),
+       plot.title = element_text(hjust = 0.5, size = 18)
+     )
+   
+   ggsave(paste0(pair_name, "_DE_genes_93.pdf"), plot = p, width = 8, height = 6)
+ }
+ 
+ 
+
+ 
+ # Define species pair combinations
+ species_pairs <- list(
+   Pig_Human = c("Pig", "Human"),
+   Pig_Cattle = c("Pig", "Cattle"),
+   Human_Cattle = c("Human", "Cattle")
+ )
+ 
+ #Initialize summary table
+ all_results <- data.frame()
+ 
+ #Iterate over each species pair
+ for (pair_name in names(species_pairs)) {
+   species_list <- species_pairs[[pair_name]]
+   results_combined <- data.frame()
+   
+   for (ts in unique(combined_info$Tissue)) {
+     tissue_meta <- combined_info %>% filter(Tissue == ts & Species %in% species_list)
+     if (nrow(tissue_meta) < 2) next
+     
+     tissue_tpm <- acc_orth_log2[, tissue_meta$SampleID, drop = FALSE]
+     
+     group1_samples <- tissue_meta %>% filter(Species == species_list[1]) %>% pull(SampleID)
+     group2_samples <- tissue_meta %>% filter(Species == species_list[2]) %>% pull(SampleID)
+     if (length(group1_samples) == 0 || length(group2_samples) == 0) next
+     
+     group1_expr <- tissue_tpm[, group1_samples, drop = FALSE]
+     group2_expr <- tissue_tpm[, group2_samples, drop = FALSE]
+     
+     group1_means <- rowMeans(group1_expr)
+     group2_means <- rowMeans(group2_expr)
+     
+     t_test <- t.test(group1_means, group2_means)
+     
+     result_row <- data.frame(
+       Comparison = pair_name,
+       Organ = ts,
+       Group1_Mean_Log2 = mean(group1_means),
+       Group1_Std_Log2 = sd(group1_means),
+       Group1_SE_Log2 = sd(group1_means) / sqrt(length(group1_means)),
+       Group2_Mean_Log2 = mean(group2_means),
+       Group2_Std_Log2 = sd(group2_means),
+       Group2_SE_Log2 = sd(group2_means) / sqrt(length(group2_means)),
+       Mean_Difference = mean(group1_means) - mean(group2_means),
+       p_value = t_test$p.value
+     )
+     
+     results_combined <- bind_rows(results_combined, result_row)
+   }
+   
+   all_results <- bind_rows(all_results, results_combined)
+ }
+ 
+ #Global FDR adjustment
+ all_results <- all_results %>%
+   mutate(p_adjust = p.adjust(p_value, method = "BH"))
+ 
+ #Save global results table
+ write_csv(all_results, "All_SpeciesPair_Mean_Log2_Comparison_GlobalAdj.csv")
+ 
+ #Save separate results for each species pair
+ for (pair_name in names(species_pairs)) {
+   df_pair <- all_results %>% filter(Comparison == pair_name)
+   write_csv(df_pair, paste0(pair_name, "_Mean_Log2_Comparison_GlobalAdj.csv"))
+ }
+
+ 
+
+
+ # color
+ direction_colors <- c("UP" = "#377eb8", "DOWN" = "#e41a1c")
+ 
+ all_results <- read_csv("All_SpeciesPair_Mean_Log2_Comparison_GlobalAdj.csv")
+ 
+ # Plot results for each species pair
+ for (pair_name in names(species_pairs)) {
+   
+   df <- all_results %>%
+     filter(Comparison == pair_name) %>%
+     mutate(
+       Organ = factor(Organ, levels = rev(tissue_order), ordered = TRUE),
+       direction = if_else(Mean_Difference > 0, "UP", "DOWN"),
+       label_text = sprintf("%.4f", p_adjust)
+     )
+   
+   p <- ggplot(df, aes(x = Organ, y = Mean_Difference, fill = direction)) +
+     geom_bar(stat = "identity", width = 0.7) +
+     geom_text(aes(label = label_text),
+               vjust = ifelse(df$Mean_Difference > 0, -0.5, 1.5),
+               size = 3) +
+     scale_fill_manual(values = direction_colors) +
+     coord_flip() +
+     theme_bw(base_size = 16) +
+     labs(
+       title = paste0(gsub("_", " vs ", pair_name), ": Mean Difference (Log2)"),
+       x = "Organ",
+       y = paste0("Mean Difference (", gsub("_", " vs ", pair_name), ")"),
+       fill = "Direction"
+     ) +
+     theme(
+       axis.text = element_text(color = "black"),
+       axis.text.y = element_text(size = 12),
+       plot.title = element_text(hjust = 0.5, size = 18)
+     )
+   
+   ggsave(paste0(pair_name, "_Mean_Difference_with_GlobalAdjPValue.pdf"), plot = p, width = 8, height = 6)
+ }
+
+

@@ -1,0 +1,16 @@
+####get common SV
+vcftools --gzvcf 599_genomes.SV.vcf.gz --maf 0.2  --max-missing  0.9  --recode --out all_pig_common_SV
+
+less -S  all_pig_common_SV.recode.vcf |grep -v "#" | cut -f 1,2  > all_pig_SV_position
+
+###Calculate the distance from each AR to its nearest SV
+python calculate-AR-distance-SV.py  --input_file Anc_combined_significant_data --sv_file all_pig_SV_position
+python calculate-AR-distance-SV.py  --input_file Asia_combined_significant_data --sv_file all_pig_SV_position
+python calculate-AR-distance-SV.py  --input_file Europe_combined_significant_data --sv_file all_pig_SV_position
+
+####Calculate the distance from random conserved regions to their nearest SVs
+python cons-bed-calcu-SV.v1.py  --sample_size 101 --sv_file all_pig_SV_position
+python cons-bed-calcu-SV.v1.py  --sample_size 442 --sv_file all_pig_SV_position
+python cons-bed-calcu-SV.v1.py  --sample_size 448 --sv_file all_pig_SV_position
+
+

@@ -1,0 +1,299 @@
+
+####Data preprocessing####
+
+'
+#!/bin/bash
+#PBS -N maf
+#PBS -l nodes=1:ppn=1
+#PBS -e /home/zhoumingfang/log/job-${PBS_JOBID}.err
+#PBS -o /home/zhoumingfang/log/job-${PBS_JOBID}.log
+#PBS -q cu
+#PBS -l mem=1gb
+#PBS -t 1-18  
+cd /work/ZMF/accelerated-region/20species/DAF/3-outgroup
+
+NC=$(sed -n "${PBS_ARRAYID}p" change.txt | awk '{print $1}')
+chr=$(sed -n "${PBS_ARRAYID}p" change.txt | awk '{print $2}')
+
+# convert hal to maf
+
+hal2maf ../../20species-mask-Alignment.hal 20species-outgroup-pig-${chr}.maf  --noDupes --onlyOrthologs --refGenome Duroc  --targetGenomes Duroc,Sus_cebifrons,Potamochoerus_porcus,Phacochoerus_africanus --refSequence ${NC}
+'
+#####deal VCF file###############
+
+'
+import pysam
+
+def process_chromosome(maf_filename, vcf_filename, chrom, output_filename,
+                      filtered_output_filename, not_in_maf_filtered_output_filename,
+                      swapped_alleles_filename):
+    """Core function for processing a single chromosome"""
+    target_species = ['Sus_cebifrons', 'Potamochoerus_porcus', 'Phacochoerus_africanus']
+    
+    vcf_file = pysam.VariantFile(vcf_filename)
+    
+
+    with (
+        pysam.VariantFile(output_filename, 'w', header=vcf_file.header) as vcf_out,
+        pysam.VariantFile(filtered_output_filename, 'w', header=vcf_file.header) as filtered_vcf_out,
+        pysam.VariantFile(not_in_maf_filtered_output_filename, 'w', header=vcf_file.header) as not_in_maf_filtered_out,
+        open(swapped_alleles_filename, 'w') as swapped_out  
+    ):
+    
+        swapped_out.write("CHROM\tPOS\tOriginal_REF\tOriginal_ALT\tSwapped_REF\tSwapped_ALT\tAncestor_Allele\n")
+        
+
+        ref_seq, ref_start_pos = [], None
+        species_seqs = {species: [] for species in target_species}
+        
+
+        vcf_iterator = iter(vcf_file.fetch(str(chrom)))
+        current_vcf_record = next(vcf_iterator, None)
+
+        with open(maf_filename, "r") as maf_file:
+            for line in maf_file:
+                if line.startswith('a'):
+         
+                    current_vcf_record = process_block(
+                        vcf_iterator, current_vcf_record, ref_seq, species_seqs, ref_start_pos,
+                        vcf_out, filtered_vcf_out, not_in_maf_filtered_out, swapped_out, target_species
+                    )
+                    ref_seq, ref_start_pos = [], None
+                    species_seqs = {species: [] for species in target_species}
+
+                elif line.startswith('s'):
+                    fields = line.strip().split()
+                    species_full = fields[1]
+                    species = species_full.split('.')[0] 
+                    start_pos = int(fields[2])
+                    sequence = fields[6].upper()  
+
+                    if "Duroc" in species: 
+                        ref_start_pos = start_pos + 1  # 0-based转1-based
+                        ref_seq = list(sequence)
+                    elif species in target_species:
+                        species_seqs[species] = list(sequence)
+
+      
+            while current_vcf_record:
+                not_in_maf_filtered_out.write(current_vcf_record)
+                current_vcf_record = next(vcf_iterator, None)
+
+def process_block(vcf_iterator, current_vcf_record, ref_seq, species_seqs, ref_start_pos,
+                 vcf_out, filtered_vcf_out, not_in_maf_filtered_out, swapped_out, target_species):
+    """del single MAF"""
+    valid_block = all(
+        (species in species_seqs) and 
+        (len(species_seqs[species]) == len(ref_seq))
+        for species in target_species
+    )
+    
+    if not valid_block or not ref_seq or ref_start_pos is None:
+        return current_vcf_record
+
+    ref_pos = ref_start_pos
+    for i in range(len(ref_seq)):
+        ref_base = ref_seq[i]
+        if ref_base == '-':
+            ref_pos += 1
+            continue
+
+
+        bases = []
+        valid = True
+        for species in target_species:
+            if i >= len(species_seqs[species]):
+                valid = False
+                break
+            base = species_seqs[species][i]
+            if base == '-':
+                valid = False
+                break
+            bases.append(base.upper())
+        
+        # indentified Ancestor base
+        ancestor_base = bases[0] if valid and len(set(bases)) == 1 else None
+
+        while current_vcf_record and current_vcf_record.pos < ref_pos:
+            not_in_maf_filtered_out.write(current_vcf_record)
+            current_vcf_record = next(vcf_iterator, None)
+        
+        if current_vcf_record and current_vcf_record.pos == ref_pos:
+            if len(current_vcf_record.ref) != 1 or len(current_vcf_record.alts) != 1:
+                filtered_vcf_out.write(current_vcf_record)
+            else:
+                vcf_ref = current_vcf_record.ref.upper()
+                vcf_alt = current_vcf_record.alts[0].upper()
+                if ref_base.upper() != vcf_ref:
+                    filtered_vcf_out.write(current_vcf_record)
+                else:
+                    if ancestor_base:
+                        process_vcf_record(
+                            current_vcf_record, ancestor_base, vcf_ref, vcf_alt,
+                            vcf_out, filtered_vcf_out, swapped_out
+                        )
+                    else:
+                        filtered_vcf_out.write(current_vcf_record)
+            current_vcf_record = next(vcf_iterator, None)
+        
+        ref_pos += 1
+    
+    return current_vcf_record
+
+def process_vcf_record(vcf_record, ancestor_base, vcf_ref, vcf_alt,
+                      vcf_out, filtered_vcf_out, swapped_out):
+    """deal single VCF file """
+    if ancestor_base == vcf_ref:
+        # if Ancestor baes consist with REF base 
+        vcf_out.write(vcf_record)
+    elif ancestor_base == vcf_alt:
+        # if Ancestor base consist with ALT base ,then change
+        swapped_out.write(
+            f"{vcf_record.chrom}\t{vcf_record.pos}\t"
+            f"{vcf_ref}\t{vcf_alt}\t"
+            f"{vcf_alt}\t{vcf_ref}\t"
+            f"{ancestor_base}\n"
+        )
+        
+        #REF/ALT change
+        vcf_record.ref = vcf_alt
+        vcf_record.alts = (vcf_ref,)
+        
+
+        for sample in vcf_record.samples:
+            gt = vcf_record.samples[sample].get("GT")
+            if gt and None not in gt:
+                vcf_record.samples[sample]["GT"] = tuple(1 - x for x in gt)
+        vcf_out.write(vcf_record)
+    else:
+        # if Ancestor base not equal with REF or ALT
+        filtered_vcf_out.write(vcf_record)
+
+def main():
+    """main funtion """
+    for chrom in range(1, 19):  # deal 1-18 chr
+
+        maf_filename = f"20species-outgroup-pig-{chrom}.maf"
+        vcf_filename = f"/work/ZMF/02/qianzhu-vcf-web/chr{chrom}.vcf.gz"
+        
+
+        output_filename = f"outgroup-chr{chrom}_processed-Anc.vcf"
+        filtered_output_filename = f"outgroup-chr{chrom}_filtered.vcf"
+        not_in_maf_filtered_output_filename = f"outgroup-chr{chrom}_not_in_maf_filtered.vcf"
+        swapped_alleles_filename = f"outgroup-chr{chrom}_swapped_alleles.tsv" 
+        print(f"Processing chromosome {chrom}...")
+        process_chromosome(
+            maf_filename, vcf_filename, chrom,
+            output_filename, filtered_output_filename,
+            not_in_maf_filtered_output_filename, swapped_alleles_filename
+        )
+        print(f"Finished processing chromosome {chrom}")
+
+if __name__ == "__main__":
+    main()
+'
+
+####comput ARs DAF values  ###############
+
+cat qsub101-DAF-SNP.sh 
+#!/bin/bash
+#PBS -N DAFg_DAF_array
+#PBS -l nodes=1:ppn=1  
+#PBS -l mem=1gb
+#PBS -e /home/zhoumingfang/log/DAFg_DAF_${PBS_ARRAYID}.err
+#PBS -o /home/zhoumingfang/log/DAFg_DAF_${PBS_ARRAYID}.log
+#PBS -q cu
+#PBS -t 1-101
+cd /work/ZMF/accelerated-region/20species/07.select
+
+
+CURRENT_REGION=$(sed -n "${PBS_ARRAYID}p" ./Sus_scrofa_combined_significant_data.bed)
+
+
+chrom=$(echo $CURRENT_REGION | awk '{print $1}')
+start=$(echo $CURRENT_REGION | awk '{print $2}')
+end=$(echo $CURRENT_REGION | awk '{print $3}')
+
+
+ VCF_FILE="/work/ZMF/accelerated-region/20species/DAF/3-outgroup/outgroup-chr${chrom}_processed-Anc.vcf"
+
+
+
+# use vcftools get snp info
+    vcftools --vcf $VCF_FILE --chr $chrom --from-bp $start --to-bp $end --freq  --remove-indels --out ./Sus-scrofa-SNP/temp_DAF-$chrom-$start
+
+    # Extract the derived allele frequency (DAF) within the region
+    if [ -f ./Sus-scrofa-SNP/temp_DAF-$chrom-$start.frq ]; then
+        awk 'NR > 1 {print $6}' ./Sus-scrofa-SNP/temp_DAF-$chrom-$start.frq | cut -d':' -f2 > ./Sus-scrofa-SNP/temp_DAF-$chrom-$start.txt
+    else
+        > ./Sus-scrofa-SNP/temp_DAF-$chrom-$start.txt
+    fi
+
+    #Calculate the regional average of derived allele frequency (DAF)
+    if [ -s ./Sus-scrofa-SNP/temp_DAF-$chrom-$start.txt ]; then
+        mean_daf=$(awk '{sum += $1; count++} END {if (count > 0) print sum / count}' ./Sus-scrofa-SNP/temp_DAF-$chrom-$start.txt)
+    else
+        mean_daf="NA"
+    fi
+
+    echo -e "$chrom\t$start\t$end\t$mean_daf" > ./Sus-scrofa-SNP/mean_DAF-$chrom-$start
+
+
+
+###### compute DAF random region
+cat qsub101-random-DAF-SNP.sh 
+#!/bin/bash
+#PBS -N pig_pi_array
+#PBS -l nodes=1:ppn=1  
+#PBS -l mem=1gb
+#PBS -e /home/zhoumingfang/log/pig_daf_random${PBS_ARRAYID}.err
+#PBS -o /home/zhoumingfang/log/pig_daf_random${PBS_ARRAYID}.log
+#PBS -q cu
+#PBS -t 1-1000 
+
+cd /work/ZMF/accelerated-region/20species/07.select
+
+
+
+mkdir -p ./Sus-scrofa-SNP/randomDAF 
+
+# Use the current task ID as the sampling identifier
+i=${PBS_ARRAYID}
+
+#Perform random sampling
+bedtools shuffle -i ./Sus_scrofa_combined_significant_data.bed -g ~/refrence-11/Sscrofa11.fasta.fai -incl ./get-background/filter-timetree-allmod4dnonconsmod.bed -chrom -excl ./Sus_scrofa_combined_significant_data.bed > ./Sus-scrofa-SNP/randomDAF/shuffled_$i.bed
+
+while read chrom start end; do
+
+
+
+ VCF_FILE="/work/ZMF/accelerated-region/20species/DAF/3-outgroup/outgroup-chr${chrom}_processed-Anc.vcf"
+
+    vcftools --vcf $VCF_FILE --chr $chrom --from-bp $start --to-bp $end --freq  --remove-indels   --out ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start
+
+    # Extract the derived allele frequency (DAF) within the region
+    if [ -f ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start.frq ]; then
+        awk 'NR > 1 {print $6}' ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start.frq | cut -d':' -f2 > ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start.txt
+    else
+        > ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start.txt
+    fi
+
+    #Calculate the regional average of derived allele frequency (DAF)
+    if [ -s ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start.txt ]; then
+        mean_daf=$(awk '{sum += $1; count++} END {if (count > 0) print sum / count}' ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF-$chrom-$start.txt)
+    else
+        mean_daf="NA"
+    fi
+
+    echo -e "$chrom\t$start\t$end\t$mean_daf\trandom$i" >> ./Sus-scrofa-SNP/random-mean/random$i-mean_DAF.txt
+
+done < ./Sus-scrofa-SNP/randomDAF/shuffled_$i.bed
+
+
+rm ./Sus-scrofa-SNP/randomDAF/random$i-temp_DAF*
+
+
+	rm ./Sus-scrofa-SNP/randomDAF/shuffled_$i.bed
+
+
+
